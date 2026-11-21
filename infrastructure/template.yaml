@@ -1,0 +1,271 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CampusConnect serverless API, Cognito authentication and DynamoDB data store. No NAT gateways or always-on compute.
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Exact frontend origin allowed by API CORS. Update to the deployed HTTPS origin before release.
+  StageName:
+    Type: String
+    Default: v1
+    AllowedPattern: '[A-Za-z0-9_-]+'
+    Description: API stage name.
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Environment:
+      Variables:
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+Resources:
+  CampusUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-users'
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 3
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UserPoolTags:
+        Project: CampusConnect
+        Environment: ShipIt2026
+  CampusUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: campusconnect-web
+      UserPoolId: !Ref CampusUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 7
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+  CampusAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      Description: CampusConnect administrators. Add users manually after verifying institutional authorization.
+      UserPoolId: !Ref CampusUserPool
+      Precedence: 1
+  CampusApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      CorsConfiguration:
+        AllowOrigins: [!Ref AllowedOrigin]
+        AllowHeaders: [authorization, content-type]
+        AllowMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+        MaxAge: 600
+      Auth:
+        Authorizers:
+          CampusJwt:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${CampusUserPool}'
+              audience: [!Ref CampusUserPoolClient]
+        DefaultAuthorizer: CampusJwt
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Users'
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: false}
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: userId, AttributeType: S}
+        - {AttributeName: recordType, AttributeType: S}
+        - {AttributeName: createdAt, AttributeType: S}
+      KeySchema: [{AttributeName: userId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byTypeCreatedAt
+          KeySchema: [{AttributeName: recordType, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}]
+          Projection: {ProjectionType: KEYS_ONLY}
+  ComplaintsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Complaints'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: complaintId, AttributeType: S}
+        - {AttributeName: ownerId, AttributeType: S}
+        - {AttributeName: recordType, AttributeType: S}
+        - {AttributeName: createdAt, AttributeType: S}
+      KeySchema: [{AttributeName: complaintId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byOwnerCreatedAt
+          KeySchema: [{AttributeName: ownerId, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+        - IndexName: byTypeCreatedAt
+          KeySchema: [{AttributeName: recordType, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+  FeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Feedback'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: feedbackId, AttributeType: S}
+        - {AttributeName: ownerId, AttributeType: S}
+        - {AttributeName: recordType, AttributeType: S}
+        - {AttributeName: createdAt, AttributeType: S}
+      KeySchema: [{AttributeName: feedbackId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byOwnerCreatedAt
+          KeySchema: [{AttributeName: ownerId, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+        - IndexName: byTypeCreatedAt
+          KeySchema: [{AttributeName: recordType, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+  SeatsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Seats'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: seatId, AttributeType: S}
+        - {AttributeName: recordType, AttributeType: S}
+      KeySchema: [{AttributeName: seatId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byType
+          KeySchema: [{AttributeName: recordType, KeyType: HASH}]
+          Projection: {ProjectionType: ALL}
+  BookingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Bookings'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: bookingId, AttributeType: S}
+        - {AttributeName: ownerId, AttributeType: S}
+      KeySchema: [{AttributeName: bookingId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byOwnerActive
+          KeySchema: [{AttributeName: ownerId, KeyType: HASH}, {AttributeName: bookingId, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+  AnnouncementsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Announcements'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions:
+        - {AttributeName: announcementId, AttributeType: S}
+        - {AttributeName: recordType, AttributeType: S}
+        - {AttributeName: createdAt, AttributeType: S}
+      KeySchema: [{AttributeName: announcementId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byTypeCreatedAt
+          KeySchema: [{AttributeName: recordType, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}]
+          Projection: {ProjectionType: ALL}
+  ActivityTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-Activity'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification: {SSEEnabled: true}
+      AttributeDefinitions: [{AttributeName: id, AttributeType: S}]
+      KeySchema: [{AttributeName: id, KeyType: HASH}]
+  CampusApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-api'
+      RetentionInDays: 7
+  CampusApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-api'
+      CodeUri: ../backend
+      Handler: dist/handler.handler
+      Description: Authenticated CampusConnect REST API.
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTable
+          COMPLAINTS_TABLE: !Ref ComplaintsTable
+          FEEDBACK_TABLE: !Ref FeedbackTable
+          SEATS_TABLE: !Ref SeatsTable
+          BOOKINGS_TABLE: !Ref BookingsTable
+          ANNOUNCEMENTS_TABLE: !Ref AnnouncementsTable
+          ACTIVITY_TABLE: !Ref ActivityTable
+      Policies:
+        - PolicyName: ScopedDataAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:TransactWriteItems, dynamodb:Query]
+                Resource: [!GetAtt UsersTable.Arn, !Sub '${UsersTable.Arn}/index/*']
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:TransactWriteItems]
+                Resource: [!GetAtt ComplaintsTable.Arn, !Sub '${ComplaintsTable.Arn}/index/*']
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:PutItem]
+                Resource: [!GetAtt FeedbackTable.Arn, !Sub '${FeedbackTable.Arn}/index/*']
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:UpdateItem, dynamodb:TransactWriteItems]
+                Resource: [!GetAtt SeatsTable.Arn, !Sub '${SeatsTable.Arn}/index/*']
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:TransactWriteItems]
+                Resource: [!GetAtt BookingsTable.Arn, !Sub '${BookingsTable.Arn}/index/*']
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+                Resource: [!GetAtt AnnouncementsTable.Arn, !Sub '${AnnouncementsTable.Arn}/index/*']
+              - Effect: Allow
+                Action: [dynamodb:PutItem]
+                Resource: !GetAtt ActivityTable.Arn
+      Events:
+        Me: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /me, Method: GET}}
+        Dashboard: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /dashboard, Method: GET}}
+        ListComplaints: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /complaints, Method: GET}}
+        CreateComplaint: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /complaints, Method: POST}}
+        UpdateComplaint: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: '/complaints/{id}', Method: PATCH}}
+        ListFeedback: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /feedback, Method: GET}}
+        CreateFeedback: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /feedback, Method: POST}}
+        ListSeats: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /seats, Method: GET}}
+        ManageSeat: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: '/seats/{seatId}', Method: PATCH}}
+        BookSeat: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: '/seats/{seatId}/booking', Method: PUT}}
+        CancelSeat: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: '/seats/{seatId}/booking', Method: DELETE}}
+        ListAnnouncements: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /announcements, Method: GET}}
+        CreateAnnouncement: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: /announcements, Method: POST}}
+        UpdateAnnouncement: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: '/announcements/{id}', Method: PATCH}}
+        DeleteAnnouncement: {Type: HttpApi, Properties: {ApiId: !Ref CampusApi, Path: '/announcements/{id}', Method: DELETE}}
+Outputs:
+  ApiBaseUrl:
+    Description: API Gateway base URL including the configured stage; use this value directly for VITE_API_URL.
+    Value: !Sub 'https://${CampusApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+  CognitoUserPoolId: {Value: !Ref CampusUserPool}
+  CognitoAppClientId: {Value: !Ref CampusUserPoolClient}
+  CognitoRegion: {Value: !Ref AWS::Region}
+  AdminGroupName: {Value: admins}
+
+  UsersTableName: {Value: !Ref UsersTable}
+  ComplaintsTableName: {Value: !Ref ComplaintsTable}
+  FeedbackTableName: {Value: !Ref FeedbackTable}
+  SeatsTableName: {Value: !Ref SeatsTable}
+  BookingsTableName: {Value: !Ref BookingsTable}
+  AnnouncementsTableName: {Value: !Ref AnnouncementsTable}
+  ActivityTableName: {Value: !Ref ActivityTable}
